@@ -4,6 +4,9 @@ target_cpu = "x64"
 is_official_build = true
 is_static_skiasharp = true
 
+cc = "clang"
+cxx = "clang++"
+
 skia_enable_tools = false
 skia_enable_fontmgr_custom_empty = false
 skia_enable_pdf = true

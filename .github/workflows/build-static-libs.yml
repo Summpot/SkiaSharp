@@ -77,10 +77,14 @@ jobs:
       - name: Setup depot_tools
         shell: pwsh
         run: |
-          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git $HOME/depot_tools
-          $depotTools = (Resolve-Path "$HOME/depot_tools").Path
-          $depotTools | Out-File -FilePath $env:GITHUB_PATH -Append
+          git clone --depth=1 --no-tags --single-branch https://chromium.googlesource.com/chromium/tools/depot_tools.git "$env:USERPROFILE\depot_tools"
+          "$env:USERPROFILE\depot_tools" | Out-File -FilePath $env:GITHUB_PATH -Append
           "DEPOT_TOOLS_WIN_TOOLCHAIN=0" | Out-File -FilePath $env:GITHUB_ENV -Append
+          $env:PATH = "$env:USERPROFILE\depot_tools;$env:PATH"
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          git config --global depot-tools.allowGlobalGitConfig true
+          & "$env:USERPROFILE\depot_tools\update_depot_tools.bat"
 
       - name: Setup MSVC environment
         uses: TheMrMilchmann/setup-msvc-dev@v3
@@ -179,8 +183,13 @@ jobs:
 
       - name: Setup depot_tools
         run: |
-          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git $HOME/depot_tools
+          git clone --depth=1 --no-tags --single-branch https://chromium.googlesource.com/chromium/tools/depot_tools.git "$HOME/depot_tools"
           echo "$HOME/depot_tools" >> $GITHUB_PATH
+          export PATH="$HOME/depot_tools:$PATH"
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          git config --global depot-tools.allowGlobalGitConfig true
+          update_depot_tools
 
       - name: Fetch SkiaSharp source
         run: |
@@ -248,8 +257,13 @@ jobs:
 
       - name: Setup depot_tools
         run: |
-          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git $HOME/depot_tools
+          git clone --depth=1 --no-tags --single-branch https://chromium.googlesource.com/chromium/tools/depot_tools.git "$HOME/depot_tools"
           echo "$HOME/depot_tools" >> $GITHUB_PATH
+          export PATH="$HOME/depot_tools:$PATH"
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          git config --global depot-tools.allowGlobalGitConfig true
+          update_depot_tools
 
       - name: Fetch SkiaSharp source
         run: |
