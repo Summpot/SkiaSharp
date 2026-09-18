@@ -14,7 +14,7 @@ on:
         default: "3.119.4"
         type: string
       skiasharp_ref:
-        description: "SkiaSharp git branch or tag to checkout"
+        description: "SkiaSharp git branch or tag in mono/SkiaSharp (e.g. release/3.119.4)"
         required: true
         default: "release/3.119.4"
         type: string
@@ -66,12 +66,8 @@ jobs:
     name: Windows x64 (Static)
     runs-on: windows-2022
     steps:
-      - name: Checkout repository
+      - name: Checkout workflow repository
         uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.skiasharp_ref }}
-          submodules: recursive
-          fetch-depth: 1
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -82,7 +78,8 @@ jobs:
         shell: pwsh
         run: |
           git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git $HOME/depot_tools
-          "$HOME/depot_tools" | Out-File -FilePath $env:GITHUB_PATH -Append
+          $depotTools = (Resolve-Path "$HOME/depot_tools").Path
+          $depotTools | Out-File -FilePath $env:GITHUB_PATH -Append
           "DEPOT_TOOLS_WIN_TOOLCHAIN=0" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Setup MSVC environment
@@ -90,11 +87,29 @@ jobs:
         with:
           arch: x64
 
+      - name: Fetch SkiaSharp source
+        shell: pwsh
+        run: |
+          $skiaRef = "${{ inputs.skiasharp_ref }}"
+          if ([string]::IsNullOrWhiteSpace($skiaRef)) {
+            $skiaRef = "release/${{ inputs.skiasharp_version }}"
+          }
+          Write-Host "Fetching SkiaSharp source from $skiaRef..."
+          New-Item -ItemType Directory -Path "src_skiasharp" -Force | Out-Null
+          Set-Location src_skiasharp
+          git init
+          git remote add upstream https://github.com/mono/SkiaSharp.git
+          git fetch --depth 1 upstream "$skiaRef"
+          git checkout -q FETCH_HEAD
+          git submodule update --init --depth 1 externals/skia
+          Set-Location ..
+
       - name: Sync Skia dependencies
         shell: pwsh
         run: |
-          cd externals/skia
+          Set-Location src_skiasharp/externals/skia
           python tools/git-sync-deps
+          Set-Location ../../
 
       - name: Build Skia & SkiaSharp (Static)
         shell: pwsh
@@ -102,21 +117,23 @@ jobs:
           $buildDir = "out/win-x64"
           New-Item -ItemType Directory -Path $buildDir -Force
           Copy-Item "native/static/args.win.gn" "$buildDir/args.gn"
-          cd externals/skia
-          gn gen "../../$buildDir"
-          autoninja -C "../../$buildDir" skia SkiaSharp
+          $buildDirAbs = (Resolve-Path $buildDir).Path
+          Set-Location src_skiasharp/externals/skia
+          gn gen "$buildDirAbs"
+          autoninja -C "$buildDirAbs" skia SkiaSharp
+          Set-Location ../../
 
       - name: Build libHarfBuzzSharp (Static)
         shell: pwsh
         run: |
-          $buildDir = (Resolve-Path "out/win-x64").Path
-          msbuild native/windows/libHarfBuzzSharp/libHarfBuzzSharp.vcxproj `
+          $buildDirAbs = (Resolve-Path "out/win-x64").Path
+          msbuild src_skiasharp/native/windows/libHarfBuzzSharp/libHarfBuzzSharp.vcxproj `
             -m `
             -t:rebuild `
             -p:Configuration=Release `
             -p:Platform=x64 `
             -p:ConfigurationType=StaticLibrary `
-            -p:OutDir="$buildDir\"
+            -p:OutDir="$buildDirAbs\"
 
       - name: Prepare Windows artifacts
         shell: pwsh
@@ -147,12 +164,8 @@ jobs:
     name: Linux x64 (Static)
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout workflow repository
         uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.skiasharp_ref }}
-          submodules: recursive
-          fetch-depth: 1
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -169,18 +182,37 @@ jobs:
           git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git $HOME/depot_tools
           echo "$HOME/depot_tools" >> $GITHUB_PATH
 
+      - name: Fetch SkiaSharp source
+        run: |
+          SKIA_REF="${{ inputs.skiasharp_ref }}"
+          if [ -z "$SKIA_REF" ]; then
+            SKIA_REF="release/${{ inputs.skiasharp_version }}"
+          fi
+          echo "Fetching SkiaSharp source from $SKIA_REF..."
+          mkdir -p src_skiasharp
+          cd src_skiasharp
+          git init
+          git remote add upstream https://github.com/mono/SkiaSharp.git
+          git fetch --depth 1 upstream "$SKIA_REF"
+          git checkout -q FETCH_HEAD
+          git submodule update --init --depth 1 externals/skia
+          cd ..
+
       - name: Sync Skia dependencies
         run: |
-          cd externals/skia
+          cd src_skiasharp/externals/skia
           python tools/git-sync-deps
+          cd ../..
 
       - name: Build Skia, SkiaSharp & HarfBuzzSharp (Static)
         run: |
           mkdir -p out/linux-x64
           cp native/static/args.linux.gn out/linux-x64/args.gn
-          cd externals/skia
-          gn gen ../../out/linux-x64
-          autoninja -C ../../out/linux-x64 skia SkiaSharp HarfBuzzSharp
+          BUILD_DIR=$(realpath out/linux-x64)
+          cd src_skiasharp/externals/skia
+          gn gen "$BUILD_DIR"
+          autoninja -C "$BUILD_DIR" skia SkiaSharp HarfBuzzSharp
+          cd ../..
 
       - name: Prepare Linux artifacts
         run: |
@@ -206,12 +238,8 @@ jobs:
     name: macOS arm64 & x64 (Static)
     runs-on: macos-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout workflow repository
         uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.skiasharp_ref }}
-          submodules: recursive
-          fetch-depth: 1
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -223,26 +251,47 @@ jobs:
           git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git $HOME/depot_tools
           echo "$HOME/depot_tools" >> $GITHUB_PATH
 
+      - name: Fetch SkiaSharp source
+        run: |
+          SKIA_REF="${{ inputs.skiasharp_ref }}"
+          if [ -z "$SKIA_REF" ]; then
+            SKIA_REF="release/${{ inputs.skiasharp_version }}"
+          fi
+          echo "Fetching SkiaSharp source from $SKIA_REF..."
+          mkdir -p src_skiasharp
+          cd src_skiasharp
+          git init
+          git remote add upstream https://github.com/mono/SkiaSharp.git
+          git fetch --depth 1 upstream "$SKIA_REF"
+          git checkout -q FETCH_HEAD
+          git submodule update --init --depth 1 externals/skia
+          cd ..
+
       - name: Sync Skia dependencies
         run: |
-          cd externals/skia
+          cd src_skiasharp/externals/skia
           python tools/git-sync-deps
+          cd ../..
 
       - name: Build macOS arm64 (Static)
         run: |
           mkdir -p out/osx-arm64
           cp native/static/args.mac.gn out/osx-arm64/args.gn
-          cd externals/skia
-          gn gen ../../out/osx-arm64
-          autoninja -C ../../out/osx-arm64 skia SkiaSharp HarfBuzzSharp
+          BUILD_DIR=$(realpath out/osx-arm64)
+          cd src_skiasharp/externals/skia
+          gn gen "$BUILD_DIR"
+          autoninja -C "$BUILD_DIR" skia SkiaSharp HarfBuzzSharp
+          cd ../..
 
       - name: Build macOS x64 (Static)
         run: |
           mkdir -p out/osx-x64
           sed 's/target_cpu = "arm64"/target_cpu = "x64"/' native/static/args.mac.gn > out/osx-x64/args.gn
-          cd externals/skia
-          gn gen ../../out/osx-x64
-          autoninja -C ../../out/osx-x64 skia SkiaSharp HarfBuzzSharp
+          BUILD_DIR=$(realpath out/osx-x64)
+          cd src_skiasharp/externals/skia
+          gn gen "$BUILD_DIR"
+          autoninja -C "$BUILD_DIR" skia SkiaSharp HarfBuzzSharp
+          cd ../..
 
       - name: Prepare macOS artifacts
         run: |
@@ -274,11 +323,8 @@ jobs:
     needs: [build-windows, build-linux, build-macos]
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout workflow repository
         uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.skiasharp_ref }}
-          fetch-depth: 1
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
