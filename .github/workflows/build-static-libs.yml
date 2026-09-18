@@ -340,6 +340,11 @@ jobs:
       - name: Checkout workflow repository
         uses: actions/checkout@v4
 
+      - name: Prepare packaging environment
+        run: |
+          # Remove global.json so dotnet pack uses the runner's installed .NET SDK instead of requiring .NET 10.0.401
+          rm -f global.json
+
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
@@ -370,8 +375,14 @@ jobs:
           path: release-assets/
           merge-multiple: true
 
+      - name: List native binaries
+        run: |
+          echo "=== Native binaries layout ==="
+          find out/native -type f || ls -R out/native
+
       - name: Pack NuGet Package
         run: |
+          rm -f global.json
           PACKAGE_VER="${{ inputs.skiasharp_version }}-avalonia.${{ inputs.avalonia_version }}"
           echo "Packing version: $PACKAGE_VER"
           dotnet pack nuget/SkiaSharp.Static/SkiaSharp.Static.csproj \
@@ -412,18 +423,22 @@ jobs:
           EOF
           )
 
+          echo "=== Release Assets to upload ==="
+          ls -lh release-assets/
+
           if gh release view "$TAG_NAME" >/dev/null 2>&1; then
             echo "Release $TAG_NAME already exists, uploading assets..."
             gh release upload "$TAG_NAME" release-assets/* --clobber
           else
             echo "Creating release $TAG_NAME..."
             gh release create "$TAG_NAME" release-assets/* \
+              --target "${{ github.sha }}" \
               --title "$RELEASE_TITLE" \
               --notes "$NOTES"
           fi
 
       - name: Publish NuGet to NuGet.org
-        if: ${{ env.NUGET_KEY != '' }}
+        if: ${{ secrets.NUGET_KEY != '' }}
         env:
           NUGET_KEY: ${{ secrets.NUGET_KEY }}
         run: |
