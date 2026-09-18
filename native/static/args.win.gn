@@ -7,7 +7,7 @@ is_static_skiasharp = true
 skia_enable_tools = false
 skia_enable_fontmgr_win_gdi = false
 skia_enable_fontmgr_win = true
-skia_enable_pdf = true
+skia_enable_pdf = false
 skia_enable_skottie = true
 
 skia_use_angle = false
