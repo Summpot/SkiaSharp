@@ -1,0 +1,86 @@
+name: Auto - Upstream SkiaSharp Sync
+
+on:
+  schedule:
+    - cron: "0 2 * * *" # Daily at 02:00 UTC
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        description: "Branch to sync from upstream (e.g. main)"
+        required: false
+        default: "main"
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync-upstream:
+    name: Sync with mono/SkiaSharp
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.target_branch || 'main' }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch from upstream mono/SkiaSharp
+        run: |
+          git remote add upstream https://github.com/mono/SkiaSharp.git || git remote set-url upstream https://github.com/mono/SkiaSharp.git
+          git fetch upstream --tags
+          git fetch upstream "${{ github.event.inputs.target_branch || 'main' }}"
+
+      - name: Evaluate and apply upstream changes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_BRANCH: ${{ github.event.inputs.target_branch || 'main' }}
+        run: |
+          echo "Checking divergence between origin/$TARGET_BRANCH and upstream/$TARGET_BRANCH..."
+          
+          BEHIND_COUNT=$(git rev-list --count "HEAD..upstream/$TARGET_BRANCH")
+          AHEAD_COUNT=$(git rev-list --count "upstream/$TARGET_BRANCH..HEAD")
+
+          echo "Commits behind upstream: $BEHIND_COUNT"
+          echo "Commits ahead of upstream: $AHEAD_COUNT"
+
+          # Push any newly fetched tags to origin
+          git push origin --tags || echo "Tags already synchronized or no new tags"
+
+          if [ "$BEHIND_COUNT" -eq 0 ]; then
+            echo "Repository branch $TARGET_BRANCH is already up to date with upstream."
+            exit 0
+          fi
+
+          echo "Found $BEHIND_COUNT new commits in upstream/$TARGET_BRANCH."
+
+          # Attempt Fast-Forward merge
+          if git merge --ff-only "upstream/$TARGET_BRANCH"; then
+            echo "Successfully fast-forwarded $TARGET_BRANCH to upstream."
+            git push origin "$TARGET_BRANCH"
+            echo "Pushed updated $TARGET_BRANCH to origin."
+          else
+            echo "Fast-forward merge not possible (branches have diverged). Creating automated sync branch and PR..."
+            SYNC_BRANCH="automation/sync-upstream-$(date +%Y%m%d-%H%M%S)"
+            git checkout -b "$SYNC_BRANCH"
+            
+            # Merge upstream allowing merge commit
+            git merge "upstream/$TARGET_BRANCH" -m "Merge upstream mono/SkiaSharp $TARGET_BRANCH into $SYNC_BRANCH" || {
+              echo "Merge conflicts detected! Pushing conflict branch for review..."
+            }
+
+            git push -u origin "$SYNC_BRANCH"
+
+            gh pr create \
+              --base "$TARGET_BRANCH" \
+              --head "$SYNC_BRANCH" \
+              --title "Automated Upstream Sync: $TARGET_BRANCH <- mono/SkiaSharp ($BEHIND_COUNT commits)" \
+              --body "This PR was automatically created to sync $BEHIND_COUNT commits from upstream \`mono/SkiaSharp:$TARGET_BRANCH\` that could not be fast-forwarded automatically. Please review and resolve any conflicts."
+          fi

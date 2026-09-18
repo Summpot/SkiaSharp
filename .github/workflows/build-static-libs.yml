@@ -1,0 +1,373 @@
+name: Build - SkiaSharp & HarfBuzzSharp Static Libraries
+
+on:
+  workflow_dispatch:
+    inputs:
+      avalonia_version:
+        description: "Avalonia Version (e.g. 12.1.2)"
+        required: true
+        default: "12.1.2"
+        type: string
+      skiasharp_version:
+        description: "SkiaSharp Version (e.g. 3.119.4)"
+        required: true
+        default: "3.119.4"
+        type: string
+      skiasharp_ref:
+        description: "SkiaSharp git branch or tag to checkout"
+        required: true
+        default: "release/3.119.4"
+        type: string
+      harfbuzz_version:
+        description: "HarfBuzzSharp Version (e.g. 8.3.1.3)"
+        required: false
+        default: "8.3.1.3"
+        type: string
+      package_id:
+        description: "NuGet Package ID"
+        required: false
+        default: "Summpot.SkiaSharp.Static"
+        type: string
+      publish_release:
+        description: "Create GitHub Release and attach assets"
+        required: false
+        default: true
+        type: boolean
+  workflow_call:
+    inputs:
+      avalonia_version:
+        required: true
+        type: string
+      skiasharp_version:
+        required: true
+        type: string
+      skiasharp_ref:
+        required: true
+        type: string
+      harfbuzz_version:
+        required: false
+        default: "8.3.1.3"
+        type: string
+      package_id:
+        required: false
+        default: "Summpot.SkiaSharp.Static"
+        type: string
+      publish_release:
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build-windows:
+    name: Windows x64 (Static)
+    runs-on: windows-2022
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.skiasharp_ref }}
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup depot_tools
+        shell: pwsh
+        run: |
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git $HOME/depot_tools
+          "$HOME/depot_tools" | Out-File -FilePath $env:GITHUB_PATH -Append
+          "DEPOT_TOOLS_WIN_TOOLCHAIN=0" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Setup MSVC environment
+        uses: TheMrMilchmann/setup-msvc-dev@v3
+        with:
+          arch: x64
+
+      - name: Sync Skia dependencies
+        shell: pwsh
+        run: |
+          cd externals/skia
+          python tools/git-sync-deps
+
+      - name: Build Skia & SkiaSharp (Static)
+        shell: pwsh
+        run: |
+          $buildDir = "out/win-x64"
+          New-Item -ItemType Directory -Path $buildDir -Force
+          Copy-Item "native/static/args.win.gn" "$buildDir/args.gn"
+          cd externals/skia
+          gn gen "../../$buildDir"
+          autoninja -C "../../$buildDir" skia SkiaSharp
+
+      - name: Build libHarfBuzzSharp (Static)
+        shell: pwsh
+        run: |
+          $buildDir = (Resolve-Path "out/win-x64").Path
+          msbuild native/windows/libHarfBuzzSharp/libHarfBuzzSharp.vcxproj `
+            -m `
+            -t:rebuild `
+            -p:Configuration=Release `
+            -p:Platform=x64 `
+            -p:ConfigurationType=StaticLibrary `
+            -p:OutDir="$buildDir\"
+
+      - name: Prepare Windows artifacts
+        shell: pwsh
+        run: |
+          $out = "out/win-x64"
+          New-Item -ItemType Directory -Path "artifacts/win-x64" -Force
+          Copy-Item "$out/skia.lib" "artifacts/win-x64/"
+          Copy-Item "$out/SkiaSharp.lib" "artifacts/win-x64/"
+          Copy-Item "$out/libHarfBuzzSharp.lib" "artifacts/win-x64/"
+          if (Test-Path "$out/libHarfBuzzSharp.pdb") {
+            Copy-Item "$out/libHarfBuzzSharp.pdb" "artifacts/win-x64/"
+          }
+          Compress-Archive -Path "artifacts/win-x64/*" -DestinationPath "SkiaSharp.Static-win-x64.zip"
+
+      - name: Upload Windows native binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-win-x64
+          path: artifacts/win-x64/
+
+      - name: Upload Windows archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-win-x64
+          path: SkiaSharp.Static-win-x64.zip
+
+  build-linux:
+    name: Linux x64 (Static)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.skiasharp_ref }}
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libc++-dev libc++abi-dev ninja-build
+
+      - name: Setup depot_tools
+        run: |
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git $HOME/depot_tools
+          echo "$HOME/depot_tools" >> $GITHUB_PATH
+
+      - name: Sync Skia dependencies
+        run: |
+          cd externals/skia
+          python tools/git-sync-deps
+
+      - name: Build Skia, SkiaSharp & HarfBuzzSharp (Static)
+        run: |
+          mkdir -p out/linux-x64
+          cp native/static/args.linux.gn out/linux-x64/args.gn
+          cd externals/skia
+          gn gen ../../out/linux-x64
+          autoninja -C ../../out/linux-x64 skia SkiaSharp HarfBuzzSharp
+
+      - name: Prepare Linux artifacts
+        run: |
+          mkdir -p artifacts/linux-x64
+          cp out/linux-x64/libskia.a artifacts/linux-x64/
+          cp out/linux-x64/libSkiaSharp.a artifacts/linux-x64/
+          cp out/linux-x64/libHarfBuzzSharp.a artifacts/linux-x64/
+          tar -czvf SkiaSharp.Static-linux-x64.tar.gz -C artifacts/linux-x64 .
+
+      - name: Upload Linux native binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-linux-x64
+          path: artifacts/linux-x64/
+
+      - name: Upload Linux archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-linux-x64
+          path: SkiaSharp.Static-linux-x64.tar.gz
+
+  build-macos:
+    name: macOS arm64 & x64 (Static)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.skiasharp_ref }}
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup depot_tools
+        run: |
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git $HOME/depot_tools
+          echo "$HOME/depot_tools" >> $GITHUB_PATH
+
+      - name: Sync Skia dependencies
+        run: |
+          cd externals/skia
+          python tools/git-sync-deps
+
+      - name: Build macOS arm64 (Static)
+        run: |
+          mkdir -p out/osx-arm64
+          cp native/static/args.mac.gn out/osx-arm64/args.gn
+          cd externals/skia
+          gn gen ../../out/osx-arm64
+          autoninja -C ../../out/osx-arm64 skia SkiaSharp HarfBuzzSharp
+
+      - name: Build macOS x64 (Static)
+        run: |
+          mkdir -p out/osx-x64
+          sed 's/target_cpu = "arm64"/target_cpu = "x64"/' native/static/args.mac.gn > out/osx-x64/args.gn
+          cd externals/skia
+          gn gen ../../out/osx-x64
+          autoninja -C ../../out/osx-x64 skia SkiaSharp HarfBuzzSharp
+
+      - name: Prepare macOS artifacts
+        run: |
+          mkdir -p artifacts/osx-arm64 artifacts/osx-x64
+          cp out/osx-arm64/libskia.a artifacts/osx-arm64/
+          cp out/osx-arm64/libSkiaSharp.a artifacts/osx-arm64/
+          cp out/osx-arm64/libHarfBuzzSharp.a artifacts/osx-arm64/
+
+          cp out/osx-x64/libskia.a artifacts/osx-x64/
+          cp out/osx-x64/libSkiaSharp.a artifacts/osx-x64/
+          cp out/osx-x64/libHarfBuzzSharp.a artifacts/osx-x64/
+
+          tar -czvf SkiaSharp.Static-osx.tar.gz -C artifacts .
+
+      - name: Upload macOS native binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-osx
+          path: artifacts/
+
+      - name: Upload macOS archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-osx
+          path: SkiaSharp.Static-osx.tar.gz
+
+  package-and-release:
+    name: Package NuGet & Publish Release
+    needs: [build-windows, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.skiasharp_ref }}
+          fetch-depth: 1
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Download Windows native binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: native-win-x64
+          path: out/native/win-x64
+
+      - name: Download Linux native binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: native-linux-x64
+          path: out/native/linux-x64
+
+      - name: Download macOS native binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: native-osx
+          path: out/native/
+
+      - name: Download archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: archive-*
+          path: release-assets/
+          merge-multiple: true
+
+      - name: Pack NuGet Package
+        run: |
+          PACKAGE_VER="${{ inputs.skiasharp_version }}-avalonia.${{ inputs.avalonia_version }}"
+          echo "Packing version: $PACKAGE_VER"
+          dotnet pack nuget/SkiaSharp.Static/SkiaSharp.Static.csproj \
+            -c Release \
+            -p:PackageId="${{ inputs.package_id }}" \
+            -p:Version="$PACKAGE_VER" \
+            -p:NativeOutputDir="$(pwd)/out/native" \
+            -o release-assets/
+
+      - name: Create GitHub Release
+        if: ${{ inputs.publish_release }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME="avalonia-${{ inputs.avalonia_version }}-skia-${{ inputs.skiasharp_version }}"
+          RELEASE_TITLE="SkiaSharp.Static for Avalonia ${{ inputs.avalonia_version }} (SkiaSharp ${{ inputs.skiasharp_version }})"
+          
+          NOTES=$(cat <<EOF
+          ### Avalonia UI Static Native Libraries
+          - **Avalonia Version**: \`${{ inputs.avalonia_version }}\`
+          - **SkiaSharp Version**: \`${{ inputs.skiasharp_version }}\`
+          - **HarfBuzzSharp Version**: \`${{ inputs.harfbuzz_version }}\`
+          - **NuGet Package ID**: \`${{ inputs.package_id }}\`
+          - **Supported Platforms**:
+            - Windows x64 (\`win-x64\`)
+            - Linux x64 (\`linux-x64\`)
+            - macOS Universal (\`osx-arm64\`, \`osx-x64\`)
+
+          #### Usage with NativeAOT:
+          Add the NuGet package reference to your Avalonia application project:
+          \`\`\`xml
+          <PackageReference Include="${{ inputs.package_id }}" Version="${{ inputs.skiasharp_version }}-avalonia.${{ inputs.avalonia_version }}" />
+          \`\`\`
+          Publish with NativeAOT:
+          \`\`\`bash
+          dotnet publish -r win-x64 -c Release /p:PublishAot=true
+          \`\`\`
+          EOF
+          )
+
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            echo "Release $TAG_NAME already exists, uploading assets..."
+            gh release upload "$TAG_NAME" release-assets/* --clobber
+          else
+            echo "Creating release $TAG_NAME..."
+            gh release create "$TAG_NAME" release-assets/* \
+              --title "$RELEASE_TITLE" \
+              --notes "$NOTES"
+          fi
+
+      - name: Publish NuGet to NuGet.org
+        if: ${{ env.NUGET_KEY != '' }}
+        env:
+          NUGET_KEY: ${{ secrets.NUGET_KEY }}
+        run: |
+          dotnet nuget push "release-assets/*.nupkg" \
+            --api-key "$NUGET_KEY" \
+            --source "https://api.nuget.org/v3/index.json" \
+            --skip-duplicate
