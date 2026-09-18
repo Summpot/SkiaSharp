@@ -22,7 +22,7 @@ skia_use_system_libwebp = false
 skia_use_system_zlib = false
 skia_use_vma = false
 skia_use_vulkan = false
-skia_use_direct3d = true
+skia_use_direct3d = false
 
 extra_cflags = [
   "/MT",
