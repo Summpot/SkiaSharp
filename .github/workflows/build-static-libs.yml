@@ -33,6 +33,21 @@ on:
         required: false
         default: true
         type: boolean
+      publish_nuget:
+        description: "Publish NuGet package to NuGet.org via Trusted Publishing"
+        required: false
+        default: true
+        type: boolean
+      nuget_user:
+        description: "NuGet.org username for Trusted Publishing"
+        required: false
+        default: "Summpot"
+        type: string
+      skip_native_builds:
+        description: "Skip native builds (reuse existing release assets for quick re-pack/publish)"
+        required: false
+        default: false
+        type: boolean
   workflow_call:
     inputs:
       avalonia_version:
@@ -56,14 +71,28 @@ on:
         required: false
         default: true
         type: boolean
+      publish_nuget:
+        required: false
+        default: true
+        type: boolean
+      nuget_user:
+        required: false
+        default: "Summpot"
+        type: string
+      skip_native_builds:
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
   packages: write
+  id-token: write
 
 jobs:
   build-windows:
     name: Windows x64 (Static)
+    if: ${{ !inputs.skip_native_builds }}
     runs-on: windows-2022
     steps:
       - name: Checkout workflow repository
@@ -166,6 +195,7 @@ jobs:
 
   build-linux:
     name: Linux x64 (Static)
+    if: ${{ !inputs.skip_native_builds }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout workflow repository
@@ -245,6 +275,7 @@ jobs:
 
   build-macos:
     name: macOS arm64 & x64 (Static)
+    if: ${{ !inputs.skip_native_builds }}
     runs-on: macos-latest
     steps:
       - name: Checkout workflow repository
@@ -335,7 +366,12 @@ jobs:
   package-and-release:
     name: Package NuGet & Publish Release
     needs: [build-windows, build-linux, build-macos]
+    if: ${{ always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
     steps:
       - name: Checkout workflow repository
         uses: actions/checkout@v4
@@ -344,6 +380,7 @@ jobs:
         run: |
           # Remove global.json so dotnet pack uses the runner's installed .NET SDK instead of requiring .NET 10.0.401
           rm -f global.json
+          mkdir -p release-assets out/native
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
@@ -351,36 +388,51 @@ jobs:
           dotnet-version: "8.0.x"
 
       - name: Download Windows native binaries
+        if: ${{ !inputs.skip_native_builds }}
         uses: actions/download-artifact@v4
         with:
           name: native-win-x64
           path: out/native/win-x64
 
       - name: Download Linux native binaries
+        if: ${{ !inputs.skip_native_builds }}
         uses: actions/download-artifact@v4
         with:
           name: native-linux-x64
           path: out/native/linux-x64
 
       - name: Download macOS native binaries
+        if: ${{ !inputs.skip_native_builds }}
         uses: actions/download-artifact@v4
         with:
           name: native-osx
           path: out/native/
 
       - name: Download archives
+        if: ${{ !inputs.skip_native_builds }}
         uses: actions/download-artifact@v4
         with:
           pattern: archive-*
           path: release-assets/
           merge-multiple: true
 
+      - name: Download existing release assets
+        if: ${{ inputs.skip_native_builds }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME="avalonia-${{ inputs.avalonia_version }}-skia-${{ inputs.skiasharp_version }}"
+          echo "Downloading assets from existing release: $TAG_NAME"
+          gh release download "$TAG_NAME" --dir release-assets
+
       - name: List native binaries
+        if: ${{ !inputs.skip_native_builds }}
         run: |
           echo "=== Native binaries layout ==="
           find out/native -type f || ls -R out/native
 
       - name: Pack NuGet Package
+        if: ${{ !inputs.skip_native_builds }}
         run: |
           rm -f global.json
           PACKAGE_VER="${{ inputs.skiasharp_version }}-avalonia.${{ inputs.avalonia_version }}"
@@ -393,7 +445,7 @@ jobs:
             -o release-assets/
 
       - name: Create GitHub Release
-        if: ${{ inputs.publish_release }}
+        if: ${{ inputs.publish_release && !inputs.skip_native_builds }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -437,15 +489,18 @@ jobs:
               --notes "$NOTES"
           fi
 
+      - name: NuGet login (Trusted Publishing OIDC)
+        if: ${{ inputs.publish_nuget }}
+        id: nuget-login
+        uses: NuGet/login@v1
+        with:
+          user: ${{ secrets.NUGET_USER || inputs.nuget_user || 'Summpot' }}
+
       - name: Publish NuGet to NuGet.org
-        env:
-          NUGET_KEY: ${{ secrets.NUGET_KEY }}
+        if: ${{ inputs.publish_nuget }}
         run: |
-          if [ -n "$NUGET_KEY" ]; then
-            dotnet nuget push "release-assets/*.nupkg" \
-              --api-key "$NUGET_KEY" \
-              --source "https://api.nuget.org/v3/index.json" \
-              --skip-duplicate
-          else
-            echo "NUGET_KEY secret is not configured. Skipping NuGet publication."
-          fi
+          echo "=== Publishing NuGet packages to NuGet.org via Trusted Publishing ==="
+          dotnet nuget push "release-assets/*.nupkg" \
+            --api-key "${{ steps.nuget-login.outputs.NUGET_API_KEY }}" \
+            --source "https://api.nuget.org/v3/index.json" \
+            --skip-duplicate

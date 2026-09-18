@@ -36,9 +36,12 @@
     - `skiasharp_ref`：编译时检出的分支或 Tag（例如 `release/3.119.4`）
     - `harfbuzz_version`：HarfBuzzSharp 版本（例如 `8.3.1.3`）
     - `package_id`：NuGet Package ID（默认 `Summpot.SkiaSharp.Static`）
-    - `publish_release`：是否创建 GitHub Release（默认 `true`）
+    - `publish_release`：是否创建 GitHub Release 并挂载资产（默认 `true`）
+    - `publish_nuget`：是否通过 NuGet.org **Trusted Publishing**（OIDC 免密认证）自动推送到 NuGet.org（默认 `true`）
+    - `nuget_user`：NuGet.org 用户名（默认 `Summpot`）
+    - `skip_native_builds`：是否跳过原生编译，直接复用已发布 Release 的产物进行打包/推送（默认 `false`）
   - **工作流调用**（由 `auto-avalonia-sync.yml` 作为 Reusable Workflow 自动调用）
-- **产物**：
+- **产物与分发**：
   - 独立平台归档包：
     - `SkiaSharp.Static-win-x64.zip`
     - `SkiaSharp.Static-linux-x64.tar.gz`
@@ -46,6 +49,7 @@
   - NuGet 统一安装包：
     - `Summpot.SkiaSharp.Static.<version>.nupkg`
   - GitHub Release：自动创建 Tag `avalonia-<AvaloniaVersion>-skia-<SkiaVersion>` 并挂载所有产物。
+  - NuGet.org 发布：利用 GitHub OIDC 与 `NuGet/login@v1` 交换短期临时 API 密钥，免密安全推送到官方 NuGet 源。
 
 ### 2.2 Avalonia 更新自动监听 (`auto-avalonia-sync.yml`)
 - 每 6 小时自动运行一次（亦可手动立即触发）。
