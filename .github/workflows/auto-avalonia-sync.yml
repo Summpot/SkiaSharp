@@ -1,0 +1,105 @@
+name: Auto - Avalonia Update Watcher & Static Release
+
+on:
+  schedule:
+    - cron: "0 */6 * * *" # Run every 6 hours
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  check-avalonia:
+    name: Check Avalonia Releases
+    runs-on: ubuntu-latest
+    outputs:
+      needs_build: ${{ steps.detect.outputs.needs_build }}
+      avalonia_version: ${{ steps.detect.outputs.avalonia_version }}
+      skiasharp_version: ${{ steps.detect.outputs.skiasharp_version }}
+      skiasharp_ref: ${{ steps.detect.outputs.skiasharp_ref }}
+      harfbuzz_version: ${{ steps.detect.outputs.harfbuzz_version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect Latest Avalonia & SkiaSharp Versions
+        id: detect
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "=== Fetching latest Avalonia release ==="
+          AVALONIA_TAG=$(gh api repos/AvaloniaUI/Avalonia/releases/latest --jq .tag_name)
+          if [ -z "$AVALONIA_TAG" ]; then
+            echo "Failed to fetch latest Avalonia release"
+            exit 1
+          fi
+          echo "Latest Avalonia release tag: $AVALONIA_TAG"
+
+          # Fetch Directory.Packages.props or props from the tagged version
+          PROPS_URL="https://raw.githubusercontent.com/AvaloniaUI/Avalonia/${AVALONIA_TAG}/Directory.Packages.props"
+          PROPS_CONTENT=$(curl -sL "$PROPS_URL")
+
+          # Parse SkiaSharp and HarfBuzzSharp version numbers
+          SKIA_VER=$(echo "$PROPS_CONTENT" | grep -E '<PackageVersion Include="SkiaSharp" Version="[^"]+"' | sed -E 's/.*Version="([^"]+)".*/\1/' || true)
+          HB_VER=$(echo "$PROPS_CONTENT" | grep -E '<PackageVersion Include="HarfBuzzSharp" Version="[^"]+"' | sed -E 's/.*Version="([^"]+)".*/\1/' || true)
+
+          # Fallback for Avalonia 11 where SkiaSharp.props is used
+          if [ -z "$SKIA_VER" ]; then
+            ALT_URL="https://raw.githubusercontent.com/AvaloniaUI/Avalonia/${AVALONIA_TAG}/build/SkiaSharp.props"
+            SKIA_VER=$(curl -sL "$ALT_URL" | grep -E 'Include="SkiaSharp" Version="[^"]+"' | head -n 1 | sed -E 's/.*Version="([^"]+)".*/\1/' || true)
+          fi
+
+          if [ -z "$HB_VER" ]; then
+            ALT_HB_URL="https://raw.githubusercontent.com/AvaloniaUI/Avalonia/${AVALONIA_TAG}/build/HarfBuzzSharp.props"
+            HB_VER=$(curl -sL "$ALT_HB_URL" | grep -E 'Include="HarfBuzzSharp" Version="[^"]+"' | head -n 1 | sed -E 's/.*Version="([^"]+)".*/\1/' || true)
+          fi
+
+          # Defaults if parsing failed or unusual structure
+          SKIA_VER=${SKIA_VER:-"3.119.4"}
+          HB_VER=${HB_VER:-"8.3.1.3"}
+
+          echo "Avalonia Version: $AVALONIA_TAG"
+          echo "SkiaSharp Version: $SKIA_VER"
+          echo "HarfBuzzSharp Version: $HB_VER"
+
+          # Resolve SkiaSharp git ref (branch or tag)
+          SKIA_REF="release/${SKIA_VER}"
+          if ! git show-ref --quiet --heads "refs/remotes/origin/${SKIA_REF}" && ! git show-ref --quiet --tags "refs/tags/v${SKIA_VER}"; then
+            if git show-ref --quiet --heads "refs/remotes/origin/release/${SKIA_VER%.*}.x"; then
+              SKIA_REF="release/${SKIA_VER%.*}.x"
+            else
+              SKIA_REF="main"
+            fi
+          fi
+          echo "Resolved SkiaSharp ref: $SKIA_REF"
+
+          # Check if Release already exists in this repo
+          TAG_CHECK="avalonia-${AVALONIA_TAG}-skia-${SKIA_VER}"
+          if gh release view "$TAG_CHECK" >/dev/null 2>&1; then
+            echo "Release $TAG_CHECK already exists in repository. No build required."
+            echo "needs_build=false" >> $GITHUB_OUTPUT
+          else
+            echo "New version detected ($TAG_CHECK). Triggering build!"
+            echo "needs_build=true" >> $GITHUB_OUTPUT
+            echo "avalonia_version=$AVALONIA_TAG" >> $GITHUB_OUTPUT
+            echo "skiasharp_version=$SKIA_VER" >> $GITHUB_OUTPUT
+            echo "skiasharp_ref=$SKIA_REF" >> $GITHUB_OUTPUT
+            echo "harfbuzz_version=$HB_VER" >> $GITHUB_OUTPUT
+          fi
+
+  trigger-static-build:
+    name: Trigger Static Libraries Build
+    needs: check-avalonia
+    if: needs.check-avalonia.outputs.needs_build == 'true'
+    uses: ./.github/workflows/build-static-libs.yml
+    with:
+      avalonia_version: ${{ needs.check-avalonia.outputs.avalonia_version }}
+      skiasharp_version: ${{ needs.check-avalonia.outputs.skiasharp_version }}
+      skiasharp_ref: ${{ needs.check-avalonia.outputs.skiasharp_ref }}
+      harfbuzz_version: ${{ needs.check-avalonia.outputs.harfbuzz_version }}
+      package_id: "Summpot.SkiaSharp.Static"
+      publish_release: true
+    secrets: inherit
