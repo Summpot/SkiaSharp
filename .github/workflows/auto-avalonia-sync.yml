@@ -8,6 +8,7 @@ on:
 permissions:
   contents: write
   packages: write
+  id-token: write
 
 jobs:
   check-avalonia:
@@ -102,4 +103,6 @@ jobs:
       harfbuzz_version: ${{ needs.check-avalonia.outputs.harfbuzz_version }}
       package_id: "Summpot.SkiaSharp.Static"
       publish_release: true
+      publish_nuget: true
+      nuget_user: "Summpot"
     secrets: inherit
