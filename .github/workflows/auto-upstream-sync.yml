@@ -40,7 +40,8 @@ jobs:
 
       - name: Evaluate and apply upstream changes
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN || secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           TARGET_BRANCH: ${{ github.event.inputs.target_branch || 'main' }}
         run: |
           echo "Checking divergence between origin/$TARGET_BRANCH and upstream/$TARGET_BRANCH..."
@@ -68,19 +69,40 @@ jobs:
             echo "Pushed updated $TARGET_BRANCH to origin."
           else
             echo "Fast-forward merge not possible (branches have diverged). Creating automated sync branch and PR..."
-            SYNC_BRANCH="automation/sync-upstream-$(date +%Y%m%d-%H%M%S)"
-            git checkout -b "$SYNC_BRANCH"
+            SYNC_BRANCH="automation/sync-upstream-$TARGET_BRANCH"
+            git checkout -B "$SYNC_BRANCH" "origin/$TARGET_BRANCH"
             
             # Merge upstream allowing merge commit
             git merge "upstream/$TARGET_BRANCH" -m "Merge upstream mono/SkiaSharp $TARGET_BRANCH into $SYNC_BRANCH" || {
               echo "Merge conflicts detected! Pushing conflict branch for review..."
             }
 
-            git push -u origin "$SYNC_BRANCH"
+            REMOTE_BRANCH_SHA=$(git ls-remote --heads origin "refs/heads/$SYNC_BRANCH" | awk '{print $1}')
+            if [ -n "$REMOTE_BRANCH_SHA" ]; then
+              git push --force-with-lease="refs/heads/$SYNC_BRANCH:$REMOTE_BRANCH_SHA" origin "$SYNC_BRANCH"
+            else
+              git push origin "$SYNC_BRANCH"
+            fi
 
-            gh pr create \
-              --base "$TARGET_BRANCH" \
-              --head "$SYNC_BRANCH" \
-              --title "Automated Upstream Sync: $TARGET_BRANCH <- mono/SkiaSharp ($BEHIND_COUNT commits)" \
-              --body "This PR was automatically created to sync $BEHIND_COUNT commits from upstream \`mono/SkiaSharp:$TARGET_BRANCH\` that could not be fast-forwarded automatically. Please review and resolve any conflicts."
+            TITLE="Automated Upstream Sync: $TARGET_BRANCH <- mono/SkiaSharp ($BEHIND_COUNT commits)"
+            BODY="This PR was automatically created to sync $BEHIND_COUNT commits from upstream \`mono/SkiaSharp:$TARGET_BRANCH\` that could not be fast-forwarded automatically. Please review and resolve any conflicts."
+
+            existing=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$SYNC_BRANCH" --base "$TARGET_BRANCH" --state open --json number --jq '.[0].number')
+            if [ -n "$existing" ]; then
+              gh api --method PATCH "repos/$GITHUB_REPOSITORY/pulls/$existing" \
+                -f title="$TITLE" \
+                -f body="$BODY" >/dev/null
+              echo "PR #$existing already exists, updated title and body."
+            else
+              gh pr create \
+                --repo "$GITHUB_REPOSITORY" \
+                --base "$TARGET_BRANCH" \
+                --head "$SYNC_BRANCH" \
+                --title "$TITLE" \
+                --body "$BODY" || {
+                  echo "::warning::Automated PR creation failed. Check that 'Allow GitHub Actions to create and approve pull requests' is enabled."
+                  echo "Manual compare link: https://github.com/$GITHUB_REPOSITORY/compare/$TARGET_BRANCH...$SYNC_BRANCH"
+                  exit 1
+                }
+            fi
           fi
