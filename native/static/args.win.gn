@@ -23,6 +23,7 @@ skia_use_system_zlib = false
 skia_use_vma = false
 skia_use_vulkan = false
 skia_use_direct3d = false
+skia_use_partition_alloc = false
 
 extra_cflags = [
   "/MT",

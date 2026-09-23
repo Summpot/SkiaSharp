@@ -11,6 +11,7 @@ skia_enable_skottie = true
 
 skia_use_metal = true
 skia_enable_graphite = true
+skia_use_partition_alloc = false
 skia_use_harfbuzz = false
 skia_use_icu = false
 skia_use_piex = true

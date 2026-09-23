@@ -26,6 +26,7 @@ skia_use_system_libwebp = false
 skia_use_system_zlib = false
 skia_use_vulkan = true
 skia_enable_graphite = true
+skia_use_partition_alloc = false
 
 extra_cflags = [
   "-DSKIA_C_DLL",
