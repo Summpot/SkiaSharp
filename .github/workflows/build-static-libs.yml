@@ -23,6 +23,11 @@ on:
         required: false
         default: "8.3.1.3"
         type: string
+      revision:
+        description: "Package revision suffix (e.g. r1, r2, leave empty for base version)"
+        required: false
+        default: "r1"
+        type: string
       package_id:
         description: "NuGet Package ID"
         required: false
@@ -62,6 +67,10 @@ on:
       harfbuzz_version:
         required: false
         default: "8.3.1.3"
+        type: string
+      revision:
+        required: false
+        default: "r1"
         type: string
       package_id:
         required: false
@@ -416,26 +425,56 @@ jobs:
           path: release-assets/
           merge-multiple: true
 
+      - name: Compute package version and tags
+        id: versioning
+        run: |
+          REV="${{ inputs.revision }}"
+          if [ -n "$REV" ]; then
+            PACKAGE_VER="${{ inputs.skiasharp_version }}-avalonia.${{ inputs.avalonia_version }}-$REV"
+            TAG_NAME="avalonia-${{ inputs.avalonia_version }}-skia-${{ inputs.skiasharp_version }}-$REV"
+          else
+            PACKAGE_VER="${{ inputs.skiasharp_version }}-avalonia.${{ inputs.avalonia_version }}"
+            TAG_NAME="avalonia-${{ inputs.avalonia_version }}-skia-${{ inputs.skiasharp_version }}"
+          fi
+          BASE_TAG="avalonia-${{ inputs.avalonia_version }}-skia-${{ inputs.skiasharp_version }}"
+          echo "PACKAGE_VER=$PACKAGE_VER" >> $GITHUB_ENV
+          echo "TAG_NAME=$TAG_NAME" >> $GITHUB_ENV
+          echo "BASE_TAG=$BASE_TAG" >> $GITHUB_ENV
+
       - name: Download existing release assets
         if: ${{ inputs.skip_native_builds }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG_NAME="avalonia-${{ inputs.avalonia_version }}-skia-${{ inputs.skiasharp_version }}"
-          echo "Downloading assets from existing release: $TAG_NAME"
-          gh release download "$TAG_NAME" --dir release-assets
+          echo "Attempting to download native archives from release $TAG_NAME or $BASE_TAG..."
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release download "$TAG_NAME" --pattern "SkiaSharp.Static-*.zip" --pattern "SkiaSharp.Static-*.tar.gz" --dir release-assets || true
+          fi
+          if [ ! -f release-assets/SkiaSharp.Static-win-x64.zip ]; then
+            echo "Falling back to downloading from base tag $BASE_TAG..."
+            gh release download "$BASE_TAG" --pattern "SkiaSharp.Static-*.zip" --pattern "SkiaSharp.Static-*.tar.gz" --dir release-assets
+          fi
+
+          echo "Extracting downloaded native archives to out/native layout..."
+          mkdir -p out/native/win-x64 out/native/linux-x64 out/native/osx-arm64 out/native/osx-x64
+          if [ -f release-assets/SkiaSharp.Static-win-x64.zip ]; then
+            unzip -q release-assets/SkiaSharp.Static-win-x64.zip -d out/native/win-x64
+          fi
+          if [ -f release-assets/SkiaSharp.Static-linux-x64.tar.gz ]; then
+            tar -xzf release-assets/SkiaSharp.Static-linux-x64.tar.gz -C out/native/linux-x64
+          fi
+          if [ -f release-assets/SkiaSharp.Static-osx.tar.gz ]; then
+            tar -xzf release-assets/SkiaSharp.Static-osx.tar.gz -C out/native
+          fi
 
       - name: List native binaries
-        if: ${{ !inputs.skip_native_builds }}
         run: |
           echo "=== Native binaries layout ==="
           find out/native -type f || ls -R out/native
 
       - name: Pack NuGet Package
-        if: ${{ !inputs.skip_native_builds }}
         run: |
           rm -f global.json
-          PACKAGE_VER="${{ inputs.skiasharp_version }}-avalonia.${{ inputs.avalonia_version }}"
           echo "Packing version: $PACKAGE_VER"
           dotnet pack nuget/SkiaSharp.Static/SkiaSharp.Static.csproj \
             -c Release \
@@ -445,18 +484,18 @@ jobs:
             -o release-assets/
 
       - name: Create GitHub Release
-        if: ${{ inputs.publish_release && !inputs.skip_native_builds }}
+        if: ${{ inputs.publish_release }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG_NAME="avalonia-${{ inputs.avalonia_version }}-skia-${{ inputs.skiasharp_version }}"
-          RELEASE_TITLE="SkiaSharp.Static for Avalonia ${{ inputs.avalonia_version }} (SkiaSharp ${{ inputs.skiasharp_version }})"
+          RELEASE_TITLE="SkiaSharp.Static for Avalonia ${{ inputs.avalonia_version }} (SkiaSharp ${{ inputs.skiasharp_version }}) $PACKAGE_VER"
           
           NOTES=$(cat <<EOF
           ### Avalonia UI Static Native Libraries
           - **Avalonia Version**: \`${{ inputs.avalonia_version }}\`
           - **SkiaSharp Version**: \`${{ inputs.skiasharp_version }}\`
           - **HarfBuzzSharp Version**: \`${{ inputs.harfbuzz_version }}\`
+          - **Package Version**: \`$PACKAGE_VER\`
           - **NuGet Package ID**: \`${{ inputs.package_id }}\`
           - **Supported Platforms**:
             - Windows x64 (\`win-x64\`)
@@ -466,7 +505,7 @@ jobs:
           #### Usage with NativeAOT:
           Add the NuGet package reference to your Avalonia application project:
           \`\`\`xml
-          <PackageReference Include="${{ inputs.package_id }}" Version="${{ inputs.skiasharp_version }}-avalonia.${{ inputs.avalonia_version }}" />
+          <PackageReference Include="${{ inputs.package_id }}" Version="$PACKAGE_VER" />
           \`\`\`
           Publish with NativeAOT:
           \`\`\`bash
