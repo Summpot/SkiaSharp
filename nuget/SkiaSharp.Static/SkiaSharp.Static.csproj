@@ -27,6 +27,7 @@
     <None Include="$(NativeOutputDir)\win-x64\*.pdb" Pack="true" PackagePath="runtimes/win-x64/native" Condition="Exists('$(NativeOutputDir)\win-x64')" />
 
     <None Include="$(NativeOutputDir)\win-arm64\*.lib" Pack="true" PackagePath="runtimes/win-arm64/native" Condition="Exists('$(NativeOutputDir)\win-arm64')" />
+    <None Include="$(NativeOutputDir)\win-arm64\*.pdb" Pack="true" PackagePath="runtimes/win-arm64/native" Condition="Exists('$(NativeOutputDir)\win-arm64')" />
 
     <None Include="$(NativeOutputDir)\linux-x64\*.a" Pack="true" PackagePath="runtimes/linux-x64/native" Condition="Exists('$(NativeOutputDir)\linux-x64')" />
     <None Include="$(NativeOutputDir)\linux-arm64\*.a" Pack="true" PackagePath="runtimes/linux-arm64/native" Condition="Exists('$(NativeOutputDir)\linux-arm64')" />

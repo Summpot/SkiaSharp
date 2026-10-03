@@ -13,11 +13,17 @@ Add this package to your Avalonia application project:
 Enable NativeAOT publishing:
 
 ```bash
-# Windows
+# Windows x64
 dotnet publish -r win-x64 -c Release /p:PublishAot=true
 
-# Linux
+# Windows arm64
+dotnet publish -r win-arm64 -c Release /p:PublishAot=true
+
+# Linux x64
 dotnet publish -r linux-x64 -c Release /p:PublishAot=true
+
+# Linux arm64
+dotnet publish -r linux-arm64 -c Release /p:PublishAot=true
 
 # macOS
 dotnet publish -r osx-arm64 -c Release /p:PublishAot=true

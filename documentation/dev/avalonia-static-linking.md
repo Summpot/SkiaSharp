@@ -44,7 +44,9 @@
 - **产物与分发**：
   - 独立平台归档包：
     - `SkiaSharp.Static-win-x64.zip`
+    - `SkiaSharp.Static-win-arm64.zip`
     - `SkiaSharp.Static-linux-x64.tar.gz`
+    - `SkiaSharp.Static-linux-arm64.tar.gz`
     - `SkiaSharp.Static-osx.tar.gz`
   - NuGet 统一安装包：
     - `Summpot.SkiaSharp.Static.<version>.nupkg`
@@ -110,8 +112,14 @@
 # Windows x64
 dotnet publish -r win-x64 -c Release /p:PublishAot=true
 
+# Windows arm64
+dotnet publish -r win-arm64 -c Release /p:PublishAot=true
+
 # Linux x64
 dotnet publish -r linux-x64 -c Release /p:PublishAot=true
+
+# Linux arm64
+dotnet publish -r linux-arm64 -c Release /p:PublishAot=true
 
 # macOS arm64
 dotnet publish -r osx-arm64 -c Release /p:PublishAot=true

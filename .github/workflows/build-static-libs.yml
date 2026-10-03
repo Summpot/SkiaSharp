@@ -100,9 +100,21 @@ permissions:
 
 jobs:
   build-windows:
-    name: Windows x64 (Static)
+    name: Windows ${{ matrix.arch }} (Static)
     if: ${{ !inputs.skip_native_builds }}
     runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            msvc_arch: x64
+            msbuild_platform: x64
+          # Cross-compile from the x64 runner. Skia GN selects HostX64/<target_cpu>/cl.exe.
+          - arch: arm64
+            msvc_arch: amd64_arm64
+            msbuild_platform: ARM64
+            platform_toolset: v143
     steps:
       - name: Checkout workflow repository
         uses: actions/checkout@v4
@@ -127,7 +139,7 @@ jobs:
       - name: Setup MSVC environment
         uses: TheMrMilchmann/setup-msvc-dev@v3
         with:
-          arch: x64
+          arch: ${{ matrix.msvc_arch }}
 
       - name: Fetch SkiaSharp source
         shell: pwsh
@@ -156,9 +168,9 @@ jobs:
       - name: Build Skia & SkiaSharp (Static)
         shell: pwsh
         run: |
-          $buildDir = "out/win-x64"
-          New-Item -ItemType Directory -Path $buildDir -Force
-          Copy-Item "native/static/args.win.gn" "$buildDir/args.gn"
+          $buildDir = "out/win-${{ matrix.arch }}"
+          New-Item -ItemType Directory -Path $buildDir -Force | Out-Null
+          (Get-Content "native/static/args.win.gn") -replace 'target_cpu = "x64"', 'target_cpu = "${{ matrix.arch }}"' | Set-Content "$buildDir/args.gn" -Encoding ascii
           $buildDirAbs = (Resolve-Path $buildDir).Path
           Set-Location src_skiasharp/externals/skia
           gn gen "$buildDirAbs"
@@ -168,44 +180,88 @@ jobs:
       - name: Build libHarfBuzzSharp (Static)
         shell: pwsh
         run: |
-          $buildDirAbs = (Resolve-Path "out/win-x64").Path
-          msbuild src_skiasharp/native/windows/libHarfBuzzSharp/libHarfBuzzSharp.vcxproj `
-            -m `
-            -t:rebuild `
-            -p:Configuration=Release `
-            -p:Platform=x64 `
-            -p:ConfigurationType=StaticLibrary `
-            -p:OutDir="$buildDirAbs\"
+          $buildDirAbs = (Resolve-Path "out/win-${{ matrix.arch }}").Path
+          $msbuildArgs = @(
+            "src_skiasharp/native/windows/libHarfBuzzSharp/libHarfBuzzSharp.vcxproj",
+            "-m",
+            "-t:rebuild",
+            "-p:Configuration=Release",
+            "-p:Platform=${{ matrix.msbuild_platform }}",
+            "-p:ConfigurationType=StaticLibrary",
+            "-p:OutDir=$buildDirAbs\"
+          )
+          $toolset = "${{ matrix.platform_toolset }}"
+          if ($toolset) {
+            $msbuildArgs += "-p:PlatformToolset=$toolset"
+          }
+          & msbuild @msbuildArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Prepare Windows artifacts
         shell: pwsh
+        env:
+          ARCH: ${{ matrix.arch }}
         run: |
-          $out = "out/win-x64"
-          New-Item -ItemType Directory -Path "artifacts/win-x64" -Force
-          Copy-Item "$out/skia.lib" "artifacts/win-x64/"
-          Copy-Item "$out/SkiaSharp.lib" "artifacts/win-x64/"
-          Copy-Item "$out/libHarfBuzzSharp.lib" "artifacts/win-x64/"
+          python -c @'
+          import os, pathlib, sys
+          arch = os.environ["ARCH"]
+          expected = {"x64": 0x8664, "arm64": 0xAA64}[arch]
+          known = {0x8664, 0xAA64, 0x14C, 0x1C0}
+          for name in ("skia.lib", "SkiaSharp.lib", "libHarfBuzzSharp.lib"):
+              data = pathlib.Path(f"out/win-{arch}", name).read_bytes()
+              if not data.startswith(b"!<arch>\n"):
+                  sys.exit(f"{name} is not a COFF archive")
+              pos = 8
+              machine = None
+              while pos + 60 <= len(data):
+                  header = data[pos:pos + 60]
+                  member_name = header[:16].decode("ascii", "replace").strip()
+                  size = int(header[48:58])
+                  member = pos + 60
+                  if member_name not in ("/", "//"):
+                      candidate = int.from_bytes(data[member:member + 2], "little")
+                      if candidate in known:
+                          machine = candidate
+                          break
+                  pos = member + size + (size % 2)
+              if machine != expected:
+                  sys.exit(f"{name} COFF machine {machine}, expected {expected:#x} for {arch}")
+              print(f"{name} COFF machine {machine:#x} matches {arch}")
+          '@
+          $out = "out/win-$env:ARCH"
+          New-Item -ItemType Directory -Path "artifacts/win-$env:ARCH" -Force | Out-Null
+          Copy-Item "$out/skia.lib" "artifacts/win-$env:ARCH/"
+          Copy-Item "$out/SkiaSharp.lib" "artifacts/win-$env:ARCH/"
+          Copy-Item "$out/libHarfBuzzSharp.lib" "artifacts/win-$env:ARCH/"
           if (Test-Path "$out/libHarfBuzzSharp.pdb") {
-            Copy-Item "$out/libHarfBuzzSharp.pdb" "artifacts/win-x64/"
+            Copy-Item "$out/libHarfBuzzSharp.pdb" "artifacts/win-$env:ARCH/"
           }
-          Compress-Archive -Path "artifacts/win-x64/*" -DestinationPath "SkiaSharp.Static-win-x64.zip"
+          Compress-Archive -Path "artifacts/win-$env:ARCH/*" -DestinationPath "SkiaSharp.Static-win-$env:ARCH.zip"
 
       - name: Upload Windows native binaries
         uses: actions/upload-artifact@v4
         with:
-          name: native-win-x64
-          path: artifacts/win-x64/
+          name: native-win-${{ matrix.arch }}
+          path: artifacts/win-${{ matrix.arch }}/
 
       - name: Upload Windows archive
         uses: actions/upload-artifact@v4
         with:
-          name: archive-win-x64
-          path: SkiaSharp.Static-win-x64.zip
+          name: archive-win-${{ matrix.arch }}
+          path: SkiaSharp.Static-win-${{ matrix.arch }}.zip
 
   build-linux:
-    name: Linux x64 (Static)
+    name: Linux ${{ matrix.arch }} (Static)
     if: ${{ !inputs.skip_native_builds }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - name: Checkout workflow repository
         uses: actions/checkout@v4
@@ -254,33 +310,46 @@ jobs:
 
       - name: Build Skia, SkiaSharp & HarfBuzzSharp (Static)
         run: |
-          mkdir -p out/linux-x64
-          cp native/static/args.linux.gn out/linux-x64/args.gn
-          BUILD_DIR=$(realpath out/linux-x64)
+          mkdir -p "out/linux-${{ matrix.arch }}"
+          sed "s/target_cpu = \"x64\"/target_cpu = \"${{ matrix.arch }}\"/" native/static/args.linux.gn > "out/linux-${{ matrix.arch }}/args.gn"
+          BUILD_DIR=$(realpath "out/linux-${{ matrix.arch }}")
           cd src_skiasharp/externals/skia
           gn gen "$BUILD_DIR"
           autoninja -C "$BUILD_DIR" skia SkiaSharp HarfBuzzSharp
           cd ../..
 
       - name: Prepare Linux artifacts
+        env:
+          ARCH: ${{ matrix.arch }}
         run: |
-          mkdir -p artifacts/linux-x64
-          cp out/linux-x64/libskia.a artifacts/linux-x64/
-          cp out/linux-x64/libSkiaSharp.a artifacts/linux-x64/
-          cp out/linux-x64/libHarfBuzzSharp.a artifacts/linux-x64/
-          tar -czvf SkiaSharp.Static-linux-x64.tar.gz -C artifacts/linux-x64 .
+          python3 -c '
+          import os, pathlib, sys
+          arch = os.environ["ARCH"]
+          data = pathlib.Path(f"out/linux-{arch}/libskia.a").read_bytes()
+          index = data.find(b"\x7fELF")
+          machine = int.from_bytes(data[index + 18:index + 20], "little") if index >= 0 else None
+          expected = {"x64": 62, "arm64": 183}[arch]
+          if machine != expected:
+              sys.exit(f"libskia.a ELF machine {machine}, expected {expected}")
+          print(f"libskia.a ELF machine {machine} matches {arch}")
+          '
+          mkdir -p "artifacts/linux-$ARCH"
+          cp "out/linux-$ARCH/libskia.a" "artifacts/linux-$ARCH/"
+          cp "out/linux-$ARCH/libSkiaSharp.a" "artifacts/linux-$ARCH/"
+          cp "out/linux-$ARCH/libHarfBuzzSharp.a" "artifacts/linux-$ARCH/"
+          tar -czvf "SkiaSharp.Static-linux-$ARCH.tar.gz" -C "artifacts/linux-$ARCH" .
 
       - name: Upload Linux native binaries
         uses: actions/upload-artifact@v4
         with:
-          name: native-linux-x64
-          path: artifacts/linux-x64/
+          name: native-linux-${{ matrix.arch }}
+          path: artifacts/linux-${{ matrix.arch }}/
 
       - name: Upload Linux archive
         uses: actions/upload-artifact@v4
         with:
-          name: archive-linux-x64
-          path: SkiaSharp.Static-linux-x64.tar.gz
+          name: archive-linux-${{ matrix.arch }}
+          path: SkiaSharp.Static-linux-${{ matrix.arch }}.tar.gz
 
   build-macos:
     name: macOS arm64 & x64 (Static)
@@ -396,19 +465,33 @@ jobs:
         with:
           dotnet-version: "8.0.x"
 
-      - name: Download Windows native binaries
+      - name: Download Windows x64 native binaries
         if: ${{ !inputs.skip_native_builds }}
         uses: actions/download-artifact@v4
         with:
           name: native-win-x64
           path: out/native/win-x64
 
-      - name: Download Linux native binaries
+      - name: Download Windows arm64 native binaries
+        if: ${{ !inputs.skip_native_builds }}
+        uses: actions/download-artifact@v4
+        with:
+          name: native-win-arm64
+          path: out/native/win-arm64
+
+      - name: Download Linux x64 native binaries
         if: ${{ !inputs.skip_native_builds }}
         uses: actions/download-artifact@v4
         with:
           name: native-linux-x64
           path: out/native/linux-x64
+
+      - name: Download Linux arm64 native binaries
+        if: ${{ !inputs.skip_native_builds }}
+        uses: actions/download-artifact@v4
+        with:
+          name: native-linux-arm64
+          path: out/native/linux-arm64
 
       - name: Download macOS native binaries
         if: ${{ !inputs.skip_native_builds }}
@@ -456,12 +539,18 @@ jobs:
           fi
 
           echo "Extracting downloaded native archives to out/native layout..."
-          mkdir -p out/native/win-x64 out/native/linux-x64 out/native/osx-arm64 out/native/osx-x64
+          mkdir -p out/native/win-x64 out/native/win-arm64 out/native/linux-x64 out/native/linux-arm64 out/native/osx-arm64 out/native/osx-x64
           if [ -f release-assets/SkiaSharp.Static-win-x64.zip ]; then
             unzip -q release-assets/SkiaSharp.Static-win-x64.zip -d out/native/win-x64
           fi
+          if [ -f release-assets/SkiaSharp.Static-win-arm64.zip ]; then
+            unzip -q release-assets/SkiaSharp.Static-win-arm64.zip -d out/native/win-arm64
+          fi
           if [ -f release-assets/SkiaSharp.Static-linux-x64.tar.gz ]; then
             tar -xzf release-assets/SkiaSharp.Static-linux-x64.tar.gz -C out/native/linux-x64
+          fi
+          if [ -f release-assets/SkiaSharp.Static-linux-arm64.tar.gz ]; then
+            tar -xzf release-assets/SkiaSharp.Static-linux-arm64.tar.gz -C out/native/linux-arm64
           fi
           if [ -f release-assets/SkiaSharp.Static-osx.tar.gz ]; then
             tar -xzf release-assets/SkiaSharp.Static-osx.tar.gz -C out/native
@@ -499,7 +588,9 @@ jobs:
           - **NuGet Package ID**: \`${{ inputs.package_id }}\`
           - **Supported Platforms**:
             - Windows x64 (\`win-x64\`)
+            - Windows arm64 (\`win-arm64\`)
             - Linux x64 (\`linux-x64\`)
+            - Linux arm64 (\`linux-arm64\`)
             - macOS Universal (\`osx-arm64\`, \`osx-x64\`)
 
           #### Usage with NativeAOT:

@@ -1,5 +1,6 @@
 # Build arguments for SkiaSharp static library on Linux
 target_os = "linux"
+# x64 is the checked-in default. The static workflow rewrites this to arm64 for the linux-arm64 job.
 target_cpu = "x64"
 is_official_build = true
 is_static_skiasharp = true
