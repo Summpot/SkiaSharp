@@ -218,8 +218,11 @@ jobs:
                   member_name = header[:16].decode("ascii", "replace").strip()
                   size = int(header[48:58])
                   member = pos + 60
-                  if member_name not in ("/", "//"):
-                      candidate = int.from_bytes(data[member:member + 2], "little")
+                  if member_name not in ("/", "//") and member + 8 <= len(data):
+                      if data[member:member + 4] == b"\x00\x00\xff\xff":
+                          candidate = int.from_bytes(data[member + 6:member + 8], "little")
+                      else:
+                          candidate = int.from_bytes(data[member:member + 2], "little")
                       if candidate in known:
                           machine = candidate
                           break
