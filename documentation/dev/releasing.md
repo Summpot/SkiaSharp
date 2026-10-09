@@ -11,11 +11,10 @@ implementation of the automation, see
 | --- | --- | --- |
 | 1 | Run **Release - Prepare** | Creates the paired `mono/skia` and `mono/SkiaSharp` release branches |
 | 2 | Wait for `skiasharp-package`, then `skiasharp-tests` | Produces the signed BAR and validates the exact Build pipeline resource |
-| 3 | Optionally run `release-testing` | Adds host/device validation for the selected BAR |
-| 4 | Use the protected internal publication process | Publishes the selected BAR's shipping packages to NuGet.org |
-| 5 | Run **Release - Finish** | Creates the tag and GitHub Release, then starts follow-up automation |
-| 6 | Run **Release - Milestones** | Reconciles shipped work and advances release milestones |
-| 7 | Merge the follow-up PRs | Lands any version bump, support update, and release notes |
+| 3 | On request, queue the MAUI official release pipeline; approve after inspecting its audit | Publishes the selected BAR's shipping packages to NuGet.org |
+| 4 | After all packages are public, review **Release - Finish** and confirm | Creates the tag and GitHub Release, then starts follow-up automation |
+| 5 | Run **Release - Milestones** | Reconciles shipped work and advances release milestones |
+| 6 | Merge the follow-up PRs | Lands any version bump, support update, and release notes |
 
 ## Safety
 
@@ -48,7 +47,10 @@ otherwise the PR targets `main`.
 
 Prepare, Finish, and Milestones use the same two-dispatch pattern: first run
 with `push` unchecked to review a read-only plan, then run again with identical
-inputs and `push` checked.
+inputs and `push` checked. Package publication uses a different control: one
+MAUI pipeline run prepares the packages and pauses at its human NuGet approval
+gate. Neither Prepare nor a successful Build/Tests run queues publication
+automatically.
 
 ## Audit a release line
 
@@ -91,26 +93,32 @@ parallel, and aggregates their findings. Each script invocation already checks
 exact-tip health from the internal `skiasharp-package` pipeline and reports the
 build ID and BAR ID. A release branch is publication-ready only when its
 matching build succeeded and recorded one BAR ID; a new cut is ready only when
-the maintenance tip has the same evidence and upstream Skia is current. If the
+the maintenance tip has the same evidence and upstream Skia is current. Among
+builds on the branch's current commit, the audit selects the newest succeeded
+build with one BAR even if a later rerun failed or was canceled, and reports
+those newer attempts. A partially succeeded build with a BAR requires review;
+it is not automatically publication-ready. If the
 internal pipeline cannot be reached, the script preserves the other evidence,
 reports the unavailable build check, and exits `2` rather than guessing.
 
 The report recommends only the next owner action: protected BAR-to-NuGet
-publication, `finish-release.ps1 -Mode DryRun`, or
-`prepare-release.ps1 -Mode DryRun`. It intentionally does not inspect BAR
-details, release notes, support metadata, milestone assignments, or milestone
-maintenance; those remain owned by their detailed workflows. Exit `0` means no
-action is needed, `1` means release work remains, and `2` means a required
-remote service or tool was unavailable.
+publication, a Finish read-only plan, or a Prepare read-only plan. In chat,
+use the `release-publish` or `release-branch` skill to dispatch the corresponding
+pipeline or workflow; repository PowerShell scripts are the local fallback.
+The audit intentionally does not inspect BAR details, release notes, support
+metadata, milestone assignments, or milestone maintenance; those remain owned
+by their detailed workflows. Exit `0` means no action is needed, `1` means
+release work remains, and `2` means a required remote service or tool was
+unavailable.
 
 Interactive output uses PowerShell's aligned table formatting and host-aware
 emphasis. Redirected output is plain text, and `-Json` remains undecorated.
 
 ## 1. Prepare the release branches
 
-Open
-[Release - Prepare](https://github.com/mono/SkiaSharp/actions/workflows/release-prepare.yml),
-select **Run workflow**, and choose `main` as the workflow branch.
+Use the `release-branch` skill in chat to dispatch
+[Release - Prepare](https://github.com/mono/SkiaSharp/actions/workflows/release-prepare.yml)
+on `main`; the Actions **Run workflow** button is also available.
 
 | Input | Value |
 | --- | --- |
@@ -150,42 +158,72 @@ The public CI pipeline may also run for the branch. Its unsigned artifacts are
 not the release BAR.
 
 Do not continue if the Build and Tests runs disagree on branch, commit, build
-number, or upstream pipeline resource.
+number, or upstream pipeline resource. The exact producing Build and Tests
+runs and BAR are the release-validation evidence; no separate local approval
+report is required. Ordinary local Cake and `dotnet test` diagnostics remain
+available when investigating a failed run, but do not replace its CI evidence.
 
-## 3. Optional: approve the exact BAR package set
+## 3. Publish the BAR to NuGet.org
 
-This extra package validation is optional. To run it, use the repository's
-`release-testing` skill on each desired host with this copy-pasteable prompt:
+When you say **"push the packages"** in chat, the `release-publish` skill
+checks the release branch's exact-tip Build, the matching resource-triggered
+Tests run, BAR, and any existing publication run. It then queues the
+[`dotnet-maui-release` internal pipeline](https://dev.azure.com/dnceng/internal/_build?definitionId=1445)
+on the **merged and mirrored MAUI `main`**, using that branch's current tip. This
+requires the SkiaSharp support in `eng/pipelines/ci-official-release.yml` to
+be available on that internal ref (introduced by
+[dotnet/maui#38967](https://github.com/dotnet/maui/pull/38967)). If the
+internal mirror is behind GitHub, wait for it to catch up. Confirm that
+pipeline 1445's configured default branch is `refs/heads/main`; stop if it
+is not. Do not queue a normal release from an unmerged feature branch.
+An already-started run must be resumed and monitored, not duplicated; the
+read-only SkiaSharp audit does not track MAUI publication runs.
 
-```text
-Use the release-testing skill to validate SkiaSharp {exact CI package version}
-from BAR {BAR ID}. Run the full available matrix on this host and produce the
-release approval report.
+The chat dispatch uses these template parameters (the example commit must be
+replaced by the exact **SkiaSharp release branch** commit, not the mono/skia
+submodule SHA):
+
+```bash
+az pipelines run \
+  --organization https://dev.azure.com/dnceng --project internal --id 1445 \
+  --parameters \
+    ghOwner=mono \
+    ghRepo=SkiaSharp \
+    commitHash=<exact-SkiaSharp-release-commit> \
+    pushWorkloadSet=false \
+    pushNugetOrg=true \
+    pushPackages=true \
+    nugetIncludeFilters=skip \
+    nugetExcludeFilters=skip \
+  --output json
 ```
 
-Add the resulting approval report, or the decision to skip this step, to the
-release record below.
+The pipeline's default branch selects the MAUI main tip; `commitHash` selects
+the separate SkiaSharp BAR commit. The agent reads back the queued run's
+resolved MAUI source ref/SHA and parameters, requires `refs/heads/main`,
+verifies that SHA contains the SkiaSharp release support, then compares the
+`NuGetReleaseAudit` artifact with the release record: BAR ID, repository,
+commit, selected and staged shipping package identities. The pipeline does
+not need a separate preparation-only run: the real run prepares its packages
+and pauses at `ManualValidation`. Inspect the audit before a human resumes
+the gate. The protected `1ES.PublishNuget` job and
+`nuget.org (dotnetframework)` service connection cannot run until approval.
+The approver must confirm package ownership and quota as well as the audit.
+The agent must not approve merely because preparation succeeded.
 
-## 4. Publish the BAR to NuGet.org
+After approval, monitor the **same run** and verify every exact staged
+shipping ID/version on NuGet.org; partial visibility or a successful dispatch
+does not constitute completion. If publication fails or is partial, preserve
+the run and package evidence and do not automatically queue a second run.
+Only after the full package set is public should Finish be planned, and
+Finish still needs a separate confirmation.
 
-> **TODO:** Document the exact internal Maestro page, button, fields, required
-> permissions, and approval sequence used to publish the selected BAR to
-> NuGet.org.
+## 4. Finish the public release
 
-Until that UI is documented, use the current team-owned protected publication
-procedure. Confirm the BAR, Build run, source branch and commit, and package
-versions against the release record. If optional release-testing was run, they
-must match its approval report exactly.
-
-After publication completes, verify that the exact SkiaSharp package version
-and its expected shipping package family are visible on NuGet.org. Do not run
-Release - Finish before that verification.
-
-## 5. Finish the public release
-
-Open
-[Release - Finish](https://github.com/mono/SkiaSharp/actions/workflows/release-finish.yml),
-select **Run workflow**, and choose `main` as the workflow branch.
+Use the `release-publish` skill in chat to dispatch
+[Release - Finish](https://github.com/mono/SkiaSharp/actions/workflows/release-finish.yml)
+on `main`, after verifying the full public package set. The Actions
+**Run workflow** button is also available.
 
 | Input | Value |
 | --- | --- |
@@ -198,8 +236,9 @@ multiple builds match, use the exact version, such as
 `4.153.0-preview.1.26453.1`.
 
 Review the plan's source branch, source commit, tag, release title, support
-update, follow-up workflows, and planned milestone mutations. After the push
-run, verify:
+update, follow-up workflows, and planned milestone mutations. Ask for
+confirmation **after** showing that plan; do not dispatch `push=true` just
+because packages appeared. After the push run, verify:
 
 - the immutable exact-version tag was created or verified at the package's
   source commit;
@@ -213,7 +252,7 @@ run, verify:
 
 Stable releases also dispatch the issue-template version update.
 
-## 6. Repair milestones when needed
+## 5. Repair milestones when needed
 
 Release - Finish already reconciles and advances milestones for every completed
 preview, RC, stable, patch, and hotfix. To inspect or repair milestone state
@@ -249,7 +288,7 @@ Chromium marker appears before the corresponding SkiaSharp release:
 | Sep 15 | | | 15 | Stable Cut → RC 1 |
 | Sep 22 | | | 22 | Stable Date → Stable |
 
-## 7. Complete the follow-up pull requests
+## 6. Complete the follow-up pull requests
 
 Review and merge the automation PRs through the normal repository process:
 
@@ -270,7 +309,6 @@ Keep these values together for the whole release:
 | `skiasharp-tests` run | Build ID and URL |
 | BAR | BAR ID |
 | Packages | Exact SkiaSharp and HarfBuzzSharp versions |
-| Optional test approval | Combined report or recorded skip decision |
 | Public release | NuGet version, tag, and GitHub Release URL |
 
 ## Related documentation
