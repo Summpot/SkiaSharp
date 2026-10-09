@@ -25,7 +25,9 @@ jobs:
         with:
           ref: ${{ github.event.inputs.target_branch || 'main' }}
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # git push must authenticate with a PAT that has the `workflow` scope:
+          # upstream commits modify .github/workflows/*, which GITHUB_TOKEN may not push.
+          token: ${{ secrets.SYNC_TOKEN || secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Configure Git identity
         run: |
@@ -44,65 +46,105 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TARGET_BRANCH: ${{ github.event.inputs.target_branch || 'main' }}
         run: |
-          echo "Checking divergence between origin/$TARGET_BRANCH and upstream/$TARGET_BRANCH..."
-          
-          BEHIND_COUNT=$(git rev-list --count "HEAD..upstream/$TARGET_BRANCH")
-          AHEAD_COUNT=$(git rev-list --count "upstream/$TARGET_BRANCH..HEAD")
+          set -euo pipefail
 
+          UPSTREAM_REF="upstream/$TARGET_BRANCH"
+          SYNC_BRANCH="automation/sync-upstream-$TARGET_BRANCH"
+
+          echo "Checking divergence between origin/$TARGET_BRANCH and $UPSTREAM_REF..."
+          BEHIND_COUNT=$(git rev-list --count "HEAD..$UPSTREAM_REF")
+          AHEAD_COUNT=$(git rev-list --count "$UPSTREAM_REF..HEAD")
           echo "Commits behind upstream: $BEHIND_COUNT"
-          echo "Commits ahead of upstream: $AHEAD_COUNT"
+          echo "Commits ahead of upstream (fork-only): $AHEAD_COUNT"
 
-          # Push any newly fetched tags to origin
-          git push origin --tags || echo "Tags already synchronized or no new tags"
+          # Push any newly fetched tags to origin; report failures honestly.
+          if ! git push origin --tags; then
+            echo "::warning::Some upstream tags could not be pushed to origin (see log above; the push token may lack the 'workflow' scope)."
+          fi
 
           if [ "$BEHIND_COUNT" -eq 0 ]; then
             echo "Repository branch $TARGET_BRANCH is already up to date with upstream."
             exit 0
           fi
 
-          echo "Found $BEHIND_COUNT new commits in upstream/$TARGET_BRANCH."
+          echo "Found $BEHIND_COUNT new commits in $UPSTREAM_REF."
 
-          # Attempt Fast-Forward merge
-          if git merge --ff-only "upstream/$TARGET_BRANCH"; then
-            echo "Successfully fast-forwarded $TARGET_BRANCH to upstream."
-            git push origin "$TARGET_BRANCH"
-            echo "Pushed updated $TARGET_BRANCH to origin."
+          # Fast-forward is only possible when the fork has no commits of its own.
+          if [ "$AHEAD_COUNT" -eq 0 ]; then
+            git merge --ff-only "$UPSTREAM_REF"
+            git push origin "HEAD:refs/heads/$TARGET_BRANCH"
+            echo "Fast-forwarded $TARGET_BRANCH to upstream and pushed."
+            exit 0
+          fi
+
+          echo "Fork has $AHEAD_COUNT commits of its own; merging upstream into $SYNC_BRANCH (based on $TARGET_BRANCH)..."
+          git checkout -B "$SYNC_BRANCH" "origin/$TARGET_BRANCH"
+
+          CONFLICTED_FILES=""
+          if ! git merge --no-ff --no-edit "$UPSTREAM_REF" -m "Merge upstream mono/SkiaSharp $TARGET_BRANCH into $SYNC_BRANCH"; then
+            # Auto-resolve modify/delete conflicts where the fork deliberately deleted the file
+            # ("DU" = deleted by us / HEAD, modified by them / upstream): keep the deletion.
+            git status --porcelain=v1 -z | while IFS= read -r -d '' entry; do
+              if [ "${entry:0:2}" = "DU" ]; then
+                path="${entry:3}"
+                echo "Auto-resolving modify/delete conflict by keeping fork deletion: $path"
+                git rm --quiet -- "$path"
+              fi
+            done
+
+            CONFLICTED_FILES=$(git diff --name-only --diff-filter=U)
+            if [ -z "$CONFLICTED_FILES" ]; then
+              git commit --no-edit
+              echo "All conflicts auto-resolved; merge committed."
+            else
+              echo "::warning::Unresolved merge conflicts:"
+              echo "$CONFLICTED_FILES"
+              git merge --abort
+              # Never publish main as the sync branch: publish the upstream tip instead so the
+              # PR shows the real upstream commits and GitHub flags the conflicts.
+              git checkout -B "$SYNC_BRANCH" "$UPSTREAM_REF"
+            fi
+          fi
+
+          # Guard: the sync branch must contain commits that are not on the target branch.
+          NEW_COMMITS=$(git rev-list --count "origin/$TARGET_BRANCH..HEAD")
+          if [ "$NEW_COMMITS" -eq 0 ]; then
+            echo "::error::$SYNC_BRANCH has no commits beyond origin/$TARGET_BRANCH; refusing to push."
+            exit 1
+          fi
+
+          git push --force origin "HEAD:refs/heads/$SYNC_BRANCH"
+          echo "Pushed $SYNC_BRANCH ($NEW_COMMITS commits beyond $TARGET_BRANCH)."
+
+          TITLE="Automated Upstream Sync: $TARGET_BRANCH <- mono/SkiaSharp ($BEHIND_COUNT commits)"
+          BODY="This PR was automatically created to sync $BEHIND_COUNT commits from upstream \`mono/SkiaSharp:$TARGET_BRANCH\` that could not be fast-forwarded automatically (the fork has $AHEAD_COUNT commits of its own). Please review and resolve any conflicts."
+          if [ -n "$CONFLICTED_FILES" ]; then
+            BODY="$BODY
+
+          **Automatic merge failed.** This branch points at the upstream tip; the following files conflict with \`$TARGET_BRANCH\` and must be resolved manually:
+          $(printf '%s\n' "$CONFLICTED_FILES" | sed 's/^/- `/; s/$/`/')"
+          fi
+
+          existing=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$SYNC_BRANCH" --base "$TARGET_BRANCH" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/pulls/$existing" \
+              -f title="$TITLE" \
+              -f body="$BODY" >/dev/null
+            echo "PR #$existing already exists, updated title and body."
           else
-            echo "Fast-forward merge not possible (branches have diverged). Creating automated sync branch and PR..."
-            SYNC_BRANCH="automation/sync-upstream-$TARGET_BRANCH"
-            git checkout -B "$SYNC_BRANCH" "origin/$TARGET_BRANCH"
-            
-            # Merge upstream allowing merge commit
-            git merge "upstream/$TARGET_BRANCH" -m "Merge upstream mono/SkiaSharp $TARGET_BRANCH into $SYNC_BRANCH" || {
-              echo "Merge conflicts detected! Pushing conflict branch for review..."
-            }
+            gh pr create \
+              --repo "$GITHUB_REPOSITORY" \
+              --base "$TARGET_BRANCH" \
+              --head "$SYNC_BRANCH" \
+              --title "$TITLE" \
+              --body "$BODY" || {
+                echo "::warning::Automated PR creation failed. Check that 'Allow GitHub Actions to create and approve pull requests' is enabled."
+                echo "Manual compare link: https://github.com/$GITHUB_REPOSITORY/compare/$TARGET_BRANCH...$SYNC_BRANCH"
+                exit 1
+              }
+          fi
 
-            REMOTE_BRANCH_SHA=$(git ls-remote --heads origin "refs/heads/$SYNC_BRANCH" | awk '{print $1}')
-            if [ -n "$REMOTE_BRANCH_SHA" ]; then
-              git push --force-with-lease="refs/heads/$SYNC_BRANCH:$REMOTE_BRANCH_SHA" origin "$SYNC_BRANCH"
-            else
-              git push origin "$SYNC_BRANCH"
-            fi
-
-            TITLE="Automated Upstream Sync: $TARGET_BRANCH <- mono/SkiaSharp ($BEHIND_COUNT commits)"
-            BODY="This PR was automatically created to sync $BEHIND_COUNT commits from upstream \`mono/SkiaSharp:$TARGET_BRANCH\` that could not be fast-forwarded automatically. Please review and resolve any conflicts."
-
-            existing=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$SYNC_BRANCH" --base "$TARGET_BRANCH" --state open --json number --jq '.[0].number')
-            if [ -n "$existing" ]; then
-              gh api --method PATCH "repos/$GITHUB_REPOSITORY/pulls/$existing" \
-                -f title="$TITLE" \
-                -f body="$BODY" >/dev/null
-              echo "PR #$existing already exists, updated title and body."
-            else
-              gh pr create \
-                --repo "$GITHUB_REPOSITORY" \
-                --base "$TARGET_BRANCH" \
-                --head "$SYNC_BRANCH" \
-                --title "$TITLE" \
-                --body "$BODY" || {
-                  echo "::warning::Automated PR creation failed. Check that 'Allow GitHub Actions to create and approve pull requests' is enabled."
-                  echo "Manual compare link: https://github.com/$GITHUB_REPOSITORY/compare/$TARGET_BRANCH...$SYNC_BRANCH"
-                  exit 1
-                }
-            fi
+          if [ -n "$CONFLICTED_FILES" ]; then
+            echo "::error::Upstream merge has unresolved conflicts; see the sync PR."
+            exit 1
           fi
