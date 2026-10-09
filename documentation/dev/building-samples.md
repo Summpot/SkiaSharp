@@ -108,25 +108,17 @@ These arguments control the **NuGet version suffix** used when rewriting package
 
 ## Building Samples
 
-The easiest way to build and validate samples is with the **`validate-samples`** Copilot skill.
-Ask Copilot to run it — it handles downloading packages, detecting versions, and building automatically.
-
-Example prompts:
-- "validate samples"
-- "build the samples against the latest CI packages"
-- "check if the Blazor sample builds"
-- "validate samples from PR 3553"
-- "do the samples build after my changes?"
-
-The skill follows the workflow described in the reference sections above: clear cache → download
-CI packages → detect preview version → build with `dotnet cake --target=samples`.
-
-See [`.agents/skills/validate-samples/SKILL.md`](../../.agents/skills/validate-samples/SKILL.md)
-for the full step-by-step workflow if you need to run it manually.
+After acquiring packages as described above, run `dotnet cake --target=samples`
+to generate and build the sample projects. Use the individual Cake targets
+listed above when diagnosing generation or build failures.
 
 ## How `samples-generate` Works
 
 The `CreateSamplesDirectory()` function in `scripts/infra/samples/samples.cake`:
+
+Sample solutions are `.slnx` files. Generation keeps the sample projects in each
+solution and removes references to projects outside `samples/`; host-specific
+variants are selected by their `.Mac`, `.Windows`, or `.Linux` suffix.
 
 1. **`<ProjectReference>`** → converted to `<PackageReference>` using the project's `<PackagingGroup>` as the package ID and version from `VERSIONS.txt`
 2. **Existing `<PackageReference>`** → version updated from `VERSIONS.txt`
